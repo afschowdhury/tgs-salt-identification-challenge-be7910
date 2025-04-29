@@ -1,0 +1,141 @@
+###Combined Loss Function
+class StableBCELoss(torch.nn.modules.Module):
+    def __init__(self):
+         super(StableBCELoss, self).__init__()
+    def forward(self, input, target):
+         neg_abs = - input.abs()
+         loss = input.clamp(min=0) - input * target + (1 + neg_abs.exp()).log()
+         return loss.mean()
+class BCEDiceLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bce = StableBCELoss()
+    def forward(self, logits, targets):
+        bce_loss = self.bce(logits, targets)  # no sigmoid here!
+        probs = torch.sigmoid(logits)         # apply sigmoid separately for dice
+        intersection = (probs * targets).sum()
+        dice_loss = 1 - (2. * intersection + 1e-6) / (probs.sum() + targets.sum() + 1e-6)
+        return bce_loss + dice_loss
+def mean(l, ignore_nan=False, empty=0):
+    l = iter(l)
+    if ignore_nan:
+        l = ifilterfalse(np.isnan, l)
+    try:
+        n = 1
+        acc = next(l)
+    except StopIteration:
+        if empty == 'raise':
+            raise ValueError('Empty mean')
+        return empty
+    for n, v in enumerate(l, 2):
+        acc += v
+    if n == 1:
+        return acc
+    return acc / n
+def lovasz_grad(gt_sorted):
+    p = len(gt_sorted)
+    gts = gt_sorted.sum()
+    intersection = gts - gt_sorted.float().cumsum(0)
+    union = gts + (1 - gt_sorted).float().cumsum(0)
+    jaccard = 1. - intersection / union
+    if p > 1:
+        jaccard[1:p] = jaccard[1:p] - jaccard[0:-1]
+    return jaccard
+def lovasz_hinge(logits, labels, per_image=True, ignore=None):
+    if per_image:
+        loss = mean(lovasz_hinge_flat(*flatten_binary_scores(log.unsqueeze(0), lab.unsqueeze(0), ignore))
+                          for log, lab in zip(logits, labels))
+    else:
+        loss = lovasz_hinge_flat(*flatten_binary_scores(logits, labels, ignore))
+    return loss
+def lovasz_hinge_flat(logits, labels, ignore=None):
+    if ignore is None:
+        logits, labels = logits.view(-1), labels.view(-1)
+    else:
+        mask = (labels != ignore)
+        logits, labels = logits[mask], labels[mask]
+    signs = 2. * labels.float() - 1.
+    errors = 1. - logits * signs
+    errors_sorted, perm = torch.sort(errors, descending=True)
+    perm = perm.data
+    gt_sorted = labels[perm]
+    grad = lovasz_grad(gt_sorted)
+    loss = torch.dot(F.relu(errors_sorted), grad)
+    return loss
+def flatten_binary_scores(scores, labels, ignore=None):
+    scores = scores.view(-1)
+    labels = labels.view(-1)
+    if ignore is None:
+        return scores, labels
+    valid = (labels != ignore)
+    return scores[valid], labels[valid]
+class LovaszLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, logits, targets):
+        logits = logits.squeeze(1)  # (B,1,H,W) -> (B,H,W)
+        targets = targets.squeeze(1)
+        return lovasz_hinge(logits, targets)
+class ComboLoss(nn.Module):
+    def __init__(self, weight_bce_dice=0.5, weight_lovasz=0.5):
+        super().__init__()
+        self.bce_dice = BCEDiceLoss()
+        self.lovasz = LovaszLoss()
+        self.w1 = weight_bce_dice
+        self.w2 = weight_lovasz
+    def forward(self, logits, targets):
+        loss1 = self.bce_dice(logits, targets)
+        loss2 = self.lovasz(logits, targets)
+        return self.w1 * loss1 + self.w2 * loss2
+###Training Loop
+def compute_iou(preds, targets, threshold=0.5, eps=1e-6):
+    preds = torch.sigmoid(preds)
+    preds = (preds > threshold).float()
+    targets = (targets > threshold).float()
+    intersection = (preds * targets).sum(dim=(2, 3))
+    union = (preds + targets - preds * targets).sum(dim=(2, 3))
+    iou = (intersection + eps) / (union + eps)
+    return iou.mean()
+def train_validate(model, train_loader, val_loader, optimizer, criterion, num_epochs, device):
+    model.to(device)
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        train_loss = 0.0
+        for images, masks in train_loader:
+            images, masks = images.to(device), masks.to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+        model.eval()
+        val_loss = 0.0
+        val_iou = 0.0
+        with torch.no_grad():
+            for images, masks in val_loader:
+                images, masks = images.to(device), masks.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                val_loss += loss.item()
+                val_iou += compute_iou(outputs, masks).item()
+        val_loss /= len(val_loader)
+        val_iou /= len(val_loader)
+        print(f"Epoch {epoch}/{num_epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val IoU: {val_iou:.4f}")
+###Model with correctly labled loss function 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+Model_Final_Losss = UNet(backbone_name='resnet50', pretrained=True).to(device)
+optimizer_exp3 = optim.Adam(Model_Final_Losss.parameters(), lr=1e-4)
+criterion_Final_Loss = ComboLoss()
+print("\nStarting Experiment 3: UNet(ResNet50) + BCE + Dice Loss")
+train_validate(
+    model=Model_Final_Losss,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    optimizer=optimizer_exp3,
+    criterion=criterion_Final_Loss,
+    num_epochs=20,
+    device=device
+)
