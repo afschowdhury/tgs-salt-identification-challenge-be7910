@@ -108,7 +108,15 @@ The notebook follows these main steps:
 | **resnet50\_Lovasz** | **0.8176** | **19** |
 
 * **Overall Best:** The `resnet50_Lovasz` configuration achieved the highest validation IoU and was used for generating the final submission file.
+
 ![Training Plot](SCR-20250429-tlbl-1.png)
+
+
+## Kaggle Submission Score:
+* **Public Score:** 0.76619
+* **Private Score:** 0.79462
+
+![Kaggle Submission](image.png)
 ## Kaggle Notebook Link
 
 You can find the kaggle notebook [here](https://www.kaggle.com/code/afschowdhury/tgs-salt-challenge-be7910-team2)
